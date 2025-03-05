@@ -30,17 +30,17 @@ import           Network.Http.Client        (Connection,
                                              baselineContextSSL, buildRequest,
                                              closeConnection,
                                              getStatusCode, http,
-                                             inputStreamBody, openConnectionSSL,
+                                             inputStreamBody, openConnection, openConnectionSSL,
                                              receiveResponse, sendRequest,
                                              setAuthorizationBasic, encodedFormBody,
-                                             setContentType, setHeader, 
+                                             setContentType, setHeader,
                                              setTransferEncoding)
 import qualified Network.Http.Client        as C
 import           OpenSSL                    (withOpenSSL)
 import qualified System.IO.Streams          as Streams
 import qualified System.IO.Streams.Attoparsec as Streams
 import           System.IO.Streams.Attoparsec (ParseException(..))
-import           Web.Stripe.Client          (APIVersion (..), Method(..), StripeConfig (..),
+import           Web.Stripe.Client          (APIVersion (..), Method(..), Protocol(..), StripeConfig (..),
                                              StripeError (..), defaultEndpoint, Endpoint (..),
                                              StripeErrorType (..), StripeRequest (..),
                                              StripeReturn, getStripeKey,
@@ -76,10 +76,12 @@ stripeConn conn config request =
 -- | Open a connection to the stripe API server
 withConnection :: Endpoint -> (Connection -> IO (Either StripeError a))
                -> IO (Either StripeError a)
-withConnection (Endpoint endpoint) f =
+withConnection ep f =
   withOpenSSL $ do
-    ctx <- baselineContextSSL
-    result <- try (openConnectionSSL ctx endpoint 443) :: IO (Either SomeException Connection)
+    result <- case endpointProtocol ep of
+      HTTPS -> do ctx <- baselineContextSSL
+                  try (openConnectionSSL ctx (endpointUrl ep) (fromIntegral (endpointPort ep))) :: IO (Either SomeException Connection)
+      HTTP  -> do try (openConnection (endpointUrl ep) (fromIntegral (endpointPort ep))) :: IO (Either SomeException Connection)
     case result of
       Left msg -> return $ Left $ StripeError ConnectionFailure (toText msg) Nothing Nothing Nothing
       Right conn -> (f conn) `finally` (closeConnection conn)
@@ -126,11 +128,14 @@ callAPI conn fromJSON' StripeConfig {..} StripeRequest{..} = do
                   ]
               | otherwise = T.encodeUtf8 endpoint
   req <- buildRequest $ do
-    http (m2m method) $ "/v1/" <> reqURL
+    http (m2m method) $ {-"/v1/" <> -} reqURL
     setAuthorizationBasic (getStripeKey secretKey) mempty
     setContentType "application/x-www-form-urlencoded"
-    setHeader "Stripe-Version" (toBytestring V20141007)
+    setHeader "User-Agent" "stripe/stripe-http-streams Haskell Rules"
     setHeader "Connection" "Keep-Alive"
+    case stripeVersion of
+      Nothing -> pure ()
+      (Just v) -> setHeader "Stripe-Version" v
     setTransferEncoding
   sendRequest conn req (encodedFormBody reqBody)
   receiveResponse conn $ \response inputStream ->
@@ -140,10 +145,11 @@ callAPI conn fromJSON' StripeConfig {..} StripeRequest{..} = do
            then return unknownCode
            else do -- FIXME: should we check the content-type instead
                    -- assuming it is application/json? --DMJ: Stripe
-                   -- gaurantees it to be JSON 
+                   -- gaurantees it to be JSON
                    v <- try (Streams.parseFromStream json' inputStream)
                    let r =
                          case v of
-                           (Left (ParseException msg)) -> Error msg
+                           (Left (ParseException msg)) -> Error $ "callAPI - parseException: " <> msg
                            (Right a) -> Success a
+                   when debug $ print r
                    return $ handleStream fromJSON' statusCode r
