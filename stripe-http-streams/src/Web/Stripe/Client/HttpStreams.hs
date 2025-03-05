@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP  #-}
 {-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
@@ -89,7 +90,7 @@ withConnection ep f =
 ------------------------------------------------------------------------------
 -- | Debug Helper
 debug :: Bool
-debug = False
+debug = True
 
 ------------------------------------------------------------------------------
 -- | convert from stripe-core Method type to http-stream Method type
@@ -133,9 +134,13 @@ callAPI conn fromJSON' StripeConfig {..} StripeRequest{..} = do
     setContentType "application/x-www-form-urlencoded"
     setHeader "User-Agent" "stripe/stripe-http-streams Haskell Rules"
     setHeader "Connection" "Keep-Alive"
+#if MIN_VERSION_stripe_core(3,0,0)
     case stripeVersion of
       Nothing -> pure ()
       (Just v) -> setHeader "Stripe-Version" v
+#else
+    setHeader "Stripe-Version" (toBytestring V20141007)
+#endif
     setTransferEncoding
   sendRequest conn req (encodedFormBody reqBody)
   receiveResponse conn $ \response inputStream ->
